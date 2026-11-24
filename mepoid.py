@@ -34,7 +34,21 @@ band80.py, vox.py, onyon.py, alix.py and clean.tecy must sit next to
 mepoid.py: fetch.py downloads them and checks their sha256, and mepoid checks
 them again every time it starts.
 
-FRIVOXS and SUBS come later, when the pieces that use them exist.
+Friends (v1.1): one FRIVOX line per friend, each with its own salt.
+
+    FRIVOX=<salt>:<their pubvox, sealed>
+
+    mine     X25519(shake_256("frivox1|" + vox(salt, key)), 9)   what you give them
+    theirs   S − t·B, t = shake_256("frisel1|" + vox(salt, key))  what they gave you
+    frivox   shake_256("frivox1-pair|" + X25519(mine, theirs) + both pubvoxes, sorted)
+
+The pubvox they gave you is sealed as a point (S = P + t·B on ed25519), never
+by adding digits: any key opens every FRIVOX into a valid key of the prime-order
+subgroup, so nothing in the file tells the right key apart. The frivox is the
+seed for the client (cypo), which runs the ratchet. Older .mepo files without
+FRIVOX lines open exactly as before.
+
+SUBS come later, when the piece that uses them exists.
 """
 import getpass
 import hashlib
@@ -58,8 +72,8 @@ import band80  # noqa: E402
 import onyon  # noqa: E402
 import vox  # noqa: E402
 
-__version__ = "1.0.0"
-__all__ = ["create", "open_", "pubvox"]
+__version__ = "1.1.0"
+__all__ = ["create", "open_", "pubvox", "friend_new", "friend_set"]
 
 HEADER = "mepoid/1"
 FIELDS = ("ALIX", "BIRTHNEST", "SYVOX", "PRIVOX")
@@ -101,6 +115,81 @@ def pubvox(privox: str) -> str:
     return _x25519(k, 9).to_bytes(32, "little").hex()
 
 
+# ---------- friends: FRIVOX (v1.1) ----------
+# Their pubvox is sealed as an ed25519 point: S = P + t·B. Adding a multiple of
+# B keeps it in the prime-order subgroup, so any key opens it into a valid
+# pubvox. Sealing by digits would not: about half of all 32-byte values are on
+# the twist, and with several friends the right key would be the only one that
+# gives every pubvox on the curve. The ed25519 math is onyon's (pinned by sha256).
+
+def _digits(band: str) -> bytes:
+    d = "".join(c for c in band if c in "0123456789")
+    if len(d) != 80:
+        raise ValueError("a syvox must have 80 digits")
+    return d.encode()
+
+
+def _mine(s: str) -> bytes:
+    """Your private half for this friendship, from vox(salt, key)."""
+    return hashlib.shake_256(b"frivox1|" + _digits(s)).digest(32)
+
+
+def _t(s: str) -> int:
+    return int.from_bytes(hashlib.shake_256(b"frisel1|" + _digits(s)).digest(64), "little") % onyon.L
+
+
+def _to_point(pub: str):
+    """The ed25519 point of a pubvox (Montgomery u, 32 bytes hex). ValueError if it
+    is not a key of the prime-order subgroup."""
+    try:
+        raw = bytes.fromhex(pub.strip())
+    except ValueError:
+        raise ValueError("a pubvox is 64 hex characters") from None
+    if len(raw) != 32:
+        raise ValueError("a pubvox is 64 hex characters")
+    u = int.from_bytes(raw, "little")
+    if u >= _P or (u + 1) % _P == 0:
+        raise ValueError("not a valid pubvox")
+    y = (u - 1) * pow(u + 1, _P - 2, _P) % _P
+    pt = onyon._decode(y.to_bytes(32, "little"))
+    if pt is None or onyon._is_zero(pt) or not onyon._is_zero(onyon._mul(onyon.L, pt)):
+        raise ValueError("not a valid pubvox")
+    return pt
+
+
+def _to_pub(pt) -> str:
+    y = int.from_bytes(onyon._encode(pt), "little") & ((1 << 255) - 1)
+    return ((1 + y) * pow(1 - y, _P - 2, _P) % _P).to_bytes(32, "little").hex()
+
+
+def _seal_pub(s: str, pub: str) -> str:
+    return onyon._encode(onyon._add(_to_point(pub), onyon._mul(_t(s), onyon.B))).hex()
+
+
+def _open_pub(s: str, sealed: str) -> str:
+    raw = bytes.fromhex(sealed)
+    pt = onyon._decode(raw) if len(raw) == 32 else None
+    if pt is None:
+        raise ValueError("a sealed pubvox is not a point")
+    return _to_pub(onyon._add(pt, onyon._neg(onyon._mul(_t(s), onyon.B))))
+
+
+def _frivox(mine: bytes, mine_pub: str, theirs: str) -> str:
+    shared = _x25519(mine, int.from_bytes(bytes.fromhex(theirs), "little")).to_bytes(32, "little")
+    a, b = sorted((bytes.fromhex(mine_pub), bytes.fromhex(theirs)))
+    return hashlib.shake_256(b"frivox1-pair|" + shared + a + b).hexdigest(32)
+
+
+def _friend(salt: str, sealed: str, key: str) -> dict:
+    s = vox.vox(salt, key)
+    k = _mine(s)
+    mine = _x25519(k, 9).to_bytes(32, "little").hex()
+    if not sealed:
+        return {"MINE": mine, "THEIRS": None, "FRIVOX": None}
+    theirs = _open_pub(s, sealed)
+    return {"MINE": mine, "THEIRS": theirs, "FRIVOX": _frivox(k, mine, theirs)}
+
+
 # ---------- file ----------
 
 def _read(path: str) -> dict:
@@ -108,14 +197,26 @@ def _read(path: str) -> dict:
         lines = [l.strip() for l in f if l.strip()]
     if not lines or lines[0] != HEADER:
         raise ValueError(f"{path}: not a {HEADER} file")
-    fields = {}
+    fields = {"FRIVOX": []}
     for l in lines[1:]:
         name, _, value = l.partition("=")
-        fields[name] = value
+        if name == "FRIVOX":                    # one line per friend, in order
+            fields["FRIVOX"].append(value)
+        else:
+            fields[name] = value
     missing = [f for f in FIELDS if f not in fields]
     if missing:
         raise ValueError(f"{path}: missing {', '.join(missing)}")
     return fields
+
+
+def _write(path: str, f: dict) -> None:
+    """Rewrite the same .mepo atomically: the old one stays whole until the new one is in."""
+    tmp = path + ".tmp"
+    with open(tmp, "x", encoding="utf-8") as out:
+        out.write(f"{HEADER}\n" + "".join(f"{k}={f[k]}\n" for k in FIELDS)
+                  + "".join(f"FRIVOX={v}\n" for v in f["FRIVOX"]))
+    os.replace(tmp, path)
 
 
 def create(folder: str, alias: str, birthnest: str, key: str) -> str:
@@ -154,14 +255,38 @@ def open_(path: str, key: str) -> dict:
         "SYVOX": vox.vox(f["SYVOX"], key),
         "PRIVOX": privox,
         "PUBVOX": pubvox(privox),
+        "FRIVOXS": [_friend(*v.split(":"), key) for v in f["FRIVOX"]],
     }
+
+
+def friend_new(path: str, key: str) -> tuple:
+    """A new friend slot. Returns (its number, your pubvox for that friend)."""
+    f = _read(path)
+    salt = band80.gen(4, 20)
+    f["FRIVOX"].append(f"{salt}:")
+    _write(path, f)
+    return len(f["FRIVOX"]), _friend(salt, "", key)["MINE"]
+
+
+def friend_set(path: str, n: int, theirs: str, key: str) -> str:
+    """Seal the pubvox friend n gave you into slot n. Returns the frivox."""
+    f = _read(path)
+    if not 1 <= n <= len(f["FRIVOX"]):
+        raise ValueError(f"there is no friend {n}")
+    _to_point(theirs)
+    salt = f["FRIVOX"][n - 1].split(":")[0]
+    f["FRIVOX"][n - 1] = f"{salt}:{_seal_pub(vox.vox(salt, key), theirs)}"
+    _write(path, f)
+    return _friend(*f["FRIVOX"][n - 1].split(":"), key)["FRIVOX"]
 
 
 # ---------- terminal ----------
 
 USAGE = """usage:
   mepoid create <alias> <birthnest.onion>    a new .mepo here (key is asked twice)
-  mepoid open <file.mepo>                    the profile (key is asked)"""
+  mepoid open <file.mepo>                    the profile (key is asked)
+  mepoid friend new <file.mepo>              a friend slot and your pubvox for them
+  mepoid friend set <file.mepo> <n> <pubvox> seal the pubvox friend n gave you"""
 
 
 def _key(twice=False) -> str:
@@ -171,6 +296,16 @@ def _key(twice=False) -> str:
     if twice and getpass.getpass("key again: ") != k:
         raise ValueError("the two keys differ: nothing was written")
     return k
+
+
+def _confirm(path: str, key: str) -> None:
+    """The key is never checked, so you check it: a typo here would seal a friend
+    under someone else's profile without saying so."""
+    a_salt, a_sealed = _read(path)["ALIX"].split(":")
+    alias = alix.open_(vox.vox(a_salt, key), a_sealed)
+    print(f"ALIX       {alias}    is this your profile? [y/N] ", end="", file=sys.stderr, flush=True)
+    if sys.stdin.readline().strip().lower() not in ("y", "yes", "s", "si", "sí"):
+        raise ValueError("not confirmed: nothing was written")
 
 
 def main(args=None) -> int:
@@ -183,7 +318,22 @@ def main(args=None) -> int:
             print(os.path.basename(create(".", args[1], args[2], _key(twice=True))))
         elif len(args) == 2 and args[0] == "open":
             for name, value in open_(args[1], _key()).items():
-                print(f"{name:<10} {value}")
+                if name != "FRIVOXS":
+                    print(f"{name:<10} {value}")
+            for i, fr in enumerate(value, 1):
+                print(f"FRIVOX {i:<3} mine   {fr['MINE']}")
+                print(f"           theirs {fr['THEIRS'] or '— waiting: mepoid friend set'}")
+                print(f"           frivox {fr['FRIVOX'] or '—'}")
+        elif len(args) == 3 and args[:2] == ["friend", "new"]:
+            key = _key()
+            _confirm(args[2], key)
+            n, mine = friend_new(args[2], key)
+            print(f"FRIVOX {n}   give them: {mine}")
+        elif len(args) == 5 and args[:2] == ["friend", "set"] and args[3].isdigit():
+            _to_point(args[4])
+            key = _key()
+            _confirm(args[2], key)
+            print(f"FRIVOX {args[3]}   frivox: {friend_set(args[2], int(args[3]), args[4], key)}")
         else:
             print(USAGE, file=sys.stderr)
             return 2
