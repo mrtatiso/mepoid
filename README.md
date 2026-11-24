@@ -52,9 +52,11 @@ The fetched files are in `.gitignore`: this repository holds only mepoid, and ea
 ```
 python3 mepoid.py create <alias> <birthnest.onion>
 python3 mepoid.py open <file.mepo>
+python3 mepoid.py friend new <file.mepo>
+python3 mepoid.py friend set <file.mepo> <n> <their pubvox>
 ```
 
-The key is asked without showing it, twice when creating. From a script it can come through stdin.
+The key is asked without showing it, twice when creating. From a script it can come through stdin, and for `friend` the confirmation comes on the next line.
 
 ### Python
 
@@ -63,6 +65,8 @@ import mepoid
 
 path = mepoid.create(".", "maria", birthnest, key)    # → "./preparka.mepo"
 profile = mepoid.open_(path, key)                       # → dict, in memory only
+n, mine = mepoid.friend_new(path, key)                  # → slot number, your pubvox for them
+frivox = mepoid.friend_set(path, n, theirs, key)        # → the seed for the client
 ```
 
 ## The .mepo
@@ -75,6 +79,7 @@ ALIX=<salt>:<sealed alias>
 BIRTHNEST=<salt>:<sealed onion>
 SYVOX=<salt>
 PRIVOX=<salt>
+FRIVOX=<salt>:<their pubvox, sealed>     one line per friend, optional
 ```
 
 Every field has its own salt, made by band80. Opening runs vox once per field with that salt and the key, and gives the result to the piece that knows the field:
@@ -86,20 +91,62 @@ Every field has its own salt, made by band80. Opening runs vox once per field wi
 | SYVOX | `vox(salt, key)` | vox |
 | PRIVOX | `vox(salt, key)` | vox |
 | PUBVOX | X25519 of the privox | mepoid |
+| FRIVOX | see Friends below | mepoid |
 
 - **Any key opens the file into a full profile:** another alias, another valid onion, another syvox, privox and pubvox. Only the right key gives yours. Nothing in the file says which one is right.
 - **PUBVOX is never written.** It comes from PRIVOX every time. Written in clear, it would let anyone try keys until one gave the same PUBVOX.
 - **The real values never touch the disk.** They live in memory while mepoid runs. (Python cannot promise to wipe memory before it ends.)
-- **mepoid never writes over a file.** If the name is taken, it seals the alias again, which gives another public name.
+- **mepoid never writes over another file.** If the name is taken, it seals the alias again, which gives another public name. The only file it rewrites is the same `.mepo`, when you add a friend, and atomically: the old one stays whole until the new one is in.
 - **The key is not checked.** There is no wrong key, so a typo opens someone else's profile without saying so. That is why create asks for it twice.
 
 ## Voices
 
-PUBVOX is X25519 (RFC 7748) of 32 bytes taken from the privox with shake_256(`privox1|` + its 80 digits). Two people who know each other's PUBVOX get the same shared secret without sending it: that is what FRIVOXS will use. X25519 lives in mepoid until the voices have their own library.
+PUBVOX is X25519 (RFC 7748) of 32 bytes taken from the privox with shake_256(`privox1|` + its 80 digits). X25519 lives in mepoid until the voices have their own library.
+
+Don't hand out PUBVOX: give each friend their own pubvox from a FRIVOX slot. Whoever holds one of your pubvoxes and also gets your `.mepo` can try keys until one gives that same pubvox.
+
+## Friends
+
+Each friend has their own FRIVOX line with its own salt, so each friend gets a different pubvox from you and two friends can't tell they know the same person.
+
+```
+$ python3 mepoid.py friend new maria.mepo
+key:
+ALIX       maria    is this your profile? [y/N] y
+FRIVOX 1   give them: 14e9cfd16c60652c20dccc313a79ae6c49ec40e2ee48a96589d63493de0e8735
+
+$ python3 mepoid.py friend set maria.mepo 1 5948fa3d2e40…a152
+key:
+ALIX       maria    is this your profile? [y/N] y
+FRIVOX 1   frivox: d3989724c03b556e53f505bf0791957780b4511ced387c91b2d495e4b1cc0f15
+```
+
+Both sides get the same frivox. It is the seed the client (cypo) starts its ratchet from; mepoid keeps no session state.
+
+`friend` shows your alias and waits for a yes before writing, because the key is never checked: a typo would seal the friend under someone else's profile without saying so.
+
+| | |
+|---|---|
+| s | vox(salt, key) |
+| your half | shake_256(`frivox1|` + the 80 digits of s), 32 bytes, as an X25519 scalar |
+| mine | X25519(your half, 9): the pubvox you give that friend |
+| sealed | S = P + t·B on ed25519, t = shake_256(`frisel1|` + the 80 digits of s), 64 bytes little-endian, mod ℓ, P their pubvox as an ed25519 point (y = (u−1)/(u+1), sign 0), stored as 32 bytes hex |
+| theirs | u of S − t·B |
+| frivox | shake_256(`frivox1-pair|` + X25519(your half, theirs) + both pubvoxes sorted), 32 bytes hex |
+
+Their pubvox is sealed as a point, never by adding digits. Only a few percent of all 32-byte values are keys of the prime-order subgroup: sealed by digits, the right key would be the only one that opens every friend into a valid key, and the file would point at it. Sealed as a point, any key opens every friend into a valid key. The ed25519 math is onyon's, pinned by sha256.
+
+`friend set` only accepts a pubvox in the prime-order subgroup, which every real one is.
+
+## Limits
+
+Any key opens the file into a full profile, so nobody can confirm a guess from the file alone. That holds until someone who has your `.mepo` also has something real of yours: one of your pubvoxes (a friend has it), your birthnest or your alias. From then on they can try keys offline, at one scrypt (64 MiB) per guess, and what protects you is the strength of your key. Use a long one.
+
+PRIVOX is your identity, not a pod: it can't be cut. With it, someone can compute your frivoxs. The ratchet in the client is what keeps past messages safe if that happens.
 
 ## Later
 
-`FRIVOXS{…}` and `SUBS{…}` come when the pieces that use them exist: friends need the exchange of PUBVOX, and subscriptions the spaces.
+`SUBS{…}` comes when the spaces exist.
 
 ## Test
 
@@ -107,7 +154,7 @@ PUBVOX is X25519 (RFC 7748) of 32 bytes taken from the privox with shake_256(`pr
 python3 -m unittest discover test
 ```
 
-Run `fetch.py` first. Includes the X25519 vector of RFC 7748.
+Run `fetch.py` first. Includes the X25519 vector of RFC 7748, fixed answers for FRIVOX that any implementation of v1.1 must reproduce, and a check that a v1.0 file opens exactly as before.
 
 ## Licence
 
@@ -119,9 +166,9 @@ MIT, see `LICENSE`.
 sha256sum mepoid.py fetch.py
 ```
 
-v1.0.0:
+v1.1.0:
 
 ```
-ddf7f94b6c7d5de3c0a8b126b9166debdb97fd34dc08b3383d5aecf196e5f430  mepoid.py
+c76f1252fe90c87055c8016ba84be53becc941b870518576a6a364a3de4d47ec  mepoid.py
 2dbf15427202862ed63e55c22618bb87ffbdabc63e6ee11870d4c10df46573ed  fetch.py
 ```
