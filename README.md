@@ -25,6 +25,8 @@ PRIVOX     06576489174115912661.41985263727627678163.21443894050521580105.139687
 PUBVOX     7fd6e9490238babfac623ce9de9580e80f08e1a23e55eb465bb5e0a10cb89221
 ```
 
+PUBVOX is shown so you can check it, not to hand out: each friend gets their own (see Friends).
+
 mepoid only coordinates. The key goes to [vox](https://github.com/mrtatiso/vox) and nowhere else; each field is sealed and opened by its own piece.
 
 ## Install
@@ -93,11 +95,11 @@ Every field has its own salt, made by band80. Opening runs vox once per field wi
 | PUBVOX | X25519 of the privox | mepoid |
 | FRIVOX | see Friends below | mepoid |
 
-- **Any key opens the file into a full profile:** another alias, another valid onion, another syvox, privox and pubvox. Only the right key gives yours. Nothing in the file says which one is right.
+- **Any key opens the file into a full profile:** another alias, another valid onion, another syvox, privox and pubvox, and other friends. Only the right key gives yours. Nothing in the file says which one is right.
 - **PUBVOX is never written.** It comes from PRIVOX every time. Written in clear, it would let anyone try keys until one gave the same PUBVOX.
 - **The real values never touch the disk.** They live in memory while mepoid runs. (Python cannot promise to wipe memory before it ends.)
 - **mepoid never writes over another file.** If the name is taken, it seals the alias again, which gives another public name. The only file it rewrites is the same `.mepo`, when you add a friend, and atomically: the old one stays whole until the new one is in.
-- **The key is not checked.** There is no wrong key, so a typo opens someone else's profile without saying so. That is why create asks for it twice.
+- **The key is not checked.** There is no wrong key, so a typo opens someone else's profile without saying so. That is why create asks for it twice, and friend shows your alias and waits for a yes.
 
 ## Voices
 
@@ -110,18 +112,18 @@ Don't hand out PUBVOX: give each friend their own pubvox from a FRIVOX slot. Who
 Each friend has their own FRIVOX line with its own salt, so each friend gets a different pubvox from you and two friends can't tell they know the same person.
 
 ```
-$ python3 mepoid.py friend new maria.mepo
+$ python3 mepoid.py friend new preparka.mepo
 key:
 ALIX       maria    is this your profile? [y/N] y
 FRIVOX 1   give them: 14e9cfd16c60652c20dccc313a79ae6c49ec40e2ee48a96589d63493de0e8735
 
-$ python3 mepoid.py friend set maria.mepo 1 5948fa3d2e40…a152
+$ python3 mepoid.py friend set preparka.mepo 1 5948fa3d2e404ffc9b219070aaf9212a808ab514a673b2e4e18a7747cc6ea152
 key:
 ALIX       maria    is this your profile? [y/N] y
 FRIVOX 1   frivox: d3989724c03b556e53f505bf0791957780b4511ced387c91b2d495e4b1cc0f15
 ```
 
-Both sides get the same frivox. It is the seed the client (cypo) starts its ratchet from; mepoid keeps no session state.
+`friend new` gives you the pubvox to hand that friend; `friend set` seals the one they hand you. Both sides get the same frivox. It is the seed the client (cypo) starts its ratchet from; mepoid keeps no session state.
 
 `friend` shows your alias and waits for a yes before writing, because the key is never checked: a typo would seal the friend under someone else's profile without saying so.
 
