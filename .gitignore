@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.vscode/
+*.tmp
+*.mepo
+band80.py
+vox.py
+onyon.py
+alix.py
+clean.tecy
